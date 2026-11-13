@@ -79,10 +79,71 @@ export interface Anim {
 	view?: 'side' | 'front' | 'above';
 	ground?: boolean;
 	props?: Prop[];
-	/** Sens de flexion [bras g., bras d., jambe g., jambe d.] : 1 ou -1 */
+	/** Sens de flexion [bras g., bras d., jambe g., jambe d.] : 1 ou -1 (vue de côté sur le dos tête à droite : [1, 1, -1, -1]) */
 	bends?: [number, number, number, number];
-	/** Points vers lesquels pointent coudes / genoux (prioritaires sur bends) */
-	poles?: (Vec | undefined)[];
+	/** Coude / genou immobile (rotation hors du plan) : segments raccourcis par la perspective, jamais retourné */
+	pins?: (Vec | undefined)[];
+}
+
+/** Proportions du stickman */
+export const LEN = { torso: 32, head: 13, upper: 18, fore: 16, thigh: 22, shin: 22 };
+
+const mix = (a: number, b: number, f: number) => a + (b - a) * f;
+const mixV = (a: Vec, b: Vec, f: number): Vec => [mix(a[0], b[0], f), mix(a[1], b[1], f)];
+const dist = (a: Vec, b: Vec) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+/** Point à len de o dans la direction deg (0 = droite, 90 = haut) */
+export function along(o: Vec, len: number, deg: number): Vec {
+	const r = (deg * Math.PI) / 180;
+	return [o[0] + len * Math.cos(r), o[1] - len * Math.sin(r)];
+}
+
+/** Pose à l'instant donné : clés parcourues en boucle, transitions adoucies (sauf linear) */
+export function poseAt(anim: Anim, seconds: number): Pose {
+	const pos = seconds / (anim.dur ?? 1.5);
+	const [a, b] = [anim.keys[Math.floor(pos) % anim.keys.length], anim.keys[(Math.floor(pos) + 1) % anim.keys.length]];
+	const f = anim.linear ? pos % 1 : (1 - Math.cos(Math.PI * (pos % 1))) / 2;
+	return {
+		hip: mixV(a.hip, b.hip, f),
+		torso: mix(a.torso, b.torso, f),
+		head: mix(a.head ?? a.torso, b.head ?? b.torso, f),
+		hands: [mixV(a.hands[0], b.hands[0], f), mixV(a.hands[1], b.hands[1], f)],
+		feet: [mixV(a.feet[0], b.feet[0], f), mixV(a.feet[1], b.feet[1], f)],
+		fx: mix(a.fx ?? 0, b.fx ?? 0, f)
+	};
+}
+
+/** Membre à deux segments de root vers target : [racine, articulation, extrémité] (cinématique inverse, sauf pin) */
+function limb(root: Vec, target: Vec, a: number, b: number, bend: number, pin?: Vec): Vec[] {
+	if (pin) return [root, pin, target];
+	const d = Math.max(Math.abs(a - b) + 0.01, Math.min(dist(root, target), a + b - 0.01));
+	const base = Math.atan2(root[1] - target[1], target[0] - root[0]);
+	const alpha = Math.acos((a * a + d * d - b * b) / (2 * a * d));
+	const joint = along(root, a, ((base + (bend > 0 ? alpha : -alpha)) * 180) / Math.PI);
+	const toward = (Math.atan2(joint[1] - target[1], target[0] - joint[0]) * 180) / Math.PI;
+	return [root, joint, along(joint, b, toward)];
+}
+
+/** Squelette d'une pose : épaules, hanches, tête, bras et jambes [racine, coude / genou, main / pied] */
+export function solve(anim: Anim, p: Pose) {
+	const view = anim.view ?? 'side';
+	const shoulder = view === 'above' ? p.hip : along(p.hip, LEN.torso, p.torso);
+	const r = (p.torso * Math.PI) / 180;
+	const [ws, wh] = view === 'side' ? [0, 0] : [10, 6];
+	const side = (o: Vec, k: number): Vec => [o[0] + Math.sin(r) * k, o[1] + Math.cos(r) * k];
+	const shoulders = [side(shoulder, -ws), side(shoulder, ws)];
+	const hips = [side(p.hip, -wh), side(p.hip, wh)];
+	const bends = anim.bends ?? (view === 'side' ? [-1, -1, 1, 1] : [-1, 1, -1, 1]);
+	return {
+		hip: p.hip,
+		shoulder,
+		shoulders,
+		hips,
+		head: view === 'above' ? shoulder : along(shoulder, LEN.head, p.head ?? p.torso),
+		arms: [0, 1].map((i) => limb(shoulders[i], p.hands[i], LEN.upper, LEN.fore, bends[i], anim.pins?.[i])),
+		legs: [0, 1].map((i) => limb(hips[i], p.feet[i], LEN.thigh, LEN.shin, bends[2 + i], anim.pins?.[2 + i])),
+		fx: p.fx ?? 0
+	};
 }
 
 export type Equipment = 'barre' | 'elastique' | 'paralleles' | 'roue' | 'banc' | 'poids';
@@ -143,11 +204,11 @@ const PUSHUP_UP = P([71.6, 90.8], 25.9, [[101, 110], [103, 110]], PLANK_FEET);
 /** Tapis vu de dessus (personne allongée, vue de face sans sol) */
 const MAT: Prop = { kind: 'box', x: 30, y: 12, w: 100, h: 106 };
 
-// Cercle des mains autour de l'épaule (80, 34), rayon 33, 8 étapes vers l'avant
-const ARM_CIRCLE = Array.from({ length: 8 }, (_, i) => {
-	const r = ((-90 + 45 * i) * Math.PI) / 180;
-	const hand = (dx: number): Vec => [80 + dx + 33 * Math.cos(r), 34 - 33 * Math.sin(r)];
-	return P([80, 66], 90, [hand(-2), hand(0)], STAND_FEET);
+// Cercle des mains autour de l'épaule (80, 34), 16 étapes vers l'avant, cibles hors de portée = bras toujours tendus
+// (bras éloigné 10° en retard pour rester visible)
+const ARM_CIRCLE = Array.from({ length: 16 }, (_, i) => {
+	const hand = (lag: number): Vec => along([80, 34], 36, -90 + 22.5 * i - lag);
+	return P([80, 66], 90, [hand(10), hand(0)], STAND_FEET);
 });
 
 // Frenchies : suspendu à la barre (y = 10), épaules à 3 hauteurs (bras fléchis au maximum, 90°, presque tendus)
@@ -185,7 +246,7 @@ export const EXERCISES: Exercise[] = [
 		cues: 'Grands cercles lents bras tendus : 10 vers l’avant, 10 vers l’arrière.',
 		tags: [],
 		dose: { sets: 1, reps: [20, 20], rest: 0 },
-		anim: { keys: ARM_CIRCLE, dur: 0.5, linear: true }
+		anim: { keys: ARM_CIRCLE, dur: 0.25, linear: true }
 	},
 	{
 		id: 'balanciers-jambes',
@@ -410,7 +471,7 @@ export const EXERCISES: Exercise[] = [
 		anim: {
 			dur: 1.6,
 			view: 'front',
-			poles: [[56, 52], [104, 52]],
+			bends: [1, -1, -1, 1],
 			props: [
 				{ kind: 'circle', at: 'handL', r: 4 },
 				{ kind: 'circle', at: 'handR', r: 4 }
@@ -434,9 +495,9 @@ export const EXERCISES: Exercise[] = [
 		anim: {
 			dur: 1.2,
 			keys: [
-				P([78, 107], 2, [[142, 106], [143, 106]], [[34, 108], [34, 108]], { head: 15 }),
-				P([78, 107], 12, [[139, 90], [140, 90]], [[35, 96], [35, 96]], { head: 20 }),
-				P([78, 107], 12, [[139, 90], [140, 90]], [[35, 96], [35, 96]], { head: 20 })
+				P([78, 107], 2, [[145, 106], [146, 106]], [[34, 108], [34, 108]], { head: 15 }),
+				P([78, 107], 12, [[142.5, 88.5], [143.5, 88.5]], [[35, 96], [35, 96]], { head: 20 }),
+				P([78, 107], 12, [[142.5, 88.5], [143.5, 88.5]], [[35, 96], [35, 96]], { head: 20 })
 			]
 		}
 	},
@@ -489,7 +550,7 @@ export const EXERCISES: Exercise[] = [
 		dose: { sets: 3, reps: [6, 10], perSide: true, rest: 30 },
 		anim: {
 			dur: 1.6,
-			bends: [-1, -1, -1, -1],
+			bends: [1, 1, -1, -1],
 			keys: [
 				P([70, 106], 0, [[101, 73], [102, 73]], [[48, 84], [48, 84]], { head: 12 }),
 				P([70, 106], 0, [[101, 73], [134, 98]], [[27, 100], [48, 84]], { head: 12 }),
@@ -530,9 +591,10 @@ export const EXERCISES: Exercise[] = [
 		dose: { sets: 3, hold: [20, 30], rest: 45 },
 		anim: {
 			dur: 2.2,
+			bends: [1, 1, -1, -1],
 			keys: [
-				P([80, 106], 15, [[141, 92], [143, 92]], [[38, 96], [38, 96]], { head: 25 }),
-				P([80, 106], 18, [[141, 89], [143, 89]], [[38, 93], [38, 93]], { head: 28 })
+				P([80, 106], 15, [[145, 91], [146, 91]], [[36.5, 95.5], [36.5, 95.5]], { head: 25 }),
+				P([80, 106], 18, [[144.5, 88], [145.5, 88]], [[36.5, 92.5], [36.5, 92.5]], { head: 28 })
 			]
 		}
 	},
@@ -574,7 +636,7 @@ export const EXERCISES: Exercise[] = [
 				{ kind: 'line', a: [71, 98], b: [71, 110] },
 				{ kind: 'line', a: [87, 98], b: [87, 110] }
 			],
-			keys: [P([74, 96], 85, [[77, 98], [79, 98]], [[116, 94], [118, 94]]), P([74, 95], 86, [[77, 98], [79, 98]], [[116, 91], [118, 91]])]
+			keys: [P([74, 96], 85, [[77, 98], [79, 98]], [[118.5, 94], [119, 93]]), P([74, 95], 86, [[77, 98], [79, 98]], [[118.5, 91.5], [119, 90.5]])]
 		}
 	},
 	{
@@ -688,12 +750,12 @@ export const EXERCISES: Exercise[] = [
 		anim: {
 			dur: 1.6,
 			view: 'front',
-			poles: [[60, 56], [100, 56]],
+			pins: [undefined, [92, 54]],
 			props: [
 				{ kind: 'line', a: [18, 40], b: [18, 110] },
 				{ kind: 'line', a: [18, 56], b: 'handR', band: true }
 			],
-			keys: [P([80, 68], 90, [[68, 68], [84, 58]], FRONT_FEET), P([80, 68], 90, [[68, 68], [110, 54]], FRONT_FEET)]
+			keys: [P([80, 68], 90, [[68, 68], [80, 54]], FRONT_FEET), P([80, 68], 90, [[68, 68], [106, 54]], FRONT_FEET)]
 		}
 	},
 	{
@@ -711,11 +773,11 @@ export const EXERCISES: Exercise[] = [
 		anim: {
 			dur: 1.6,
 			bends: [-1, -1, -1, -1],
-			poles: [undefined, [84, 100]],
+			pins: [undefined, [84, 100]],
 			props: [{ kind: 'circle', at: 'handR', r: 3.5 }],
 			keys: [
-				P([70, 100], 0, [[118, 104], [86, 108]], [[30, 104], [30, 104]], { head: 10 }),
-				P([70, 100], 0, [[118, 104], [87, 82]], [[30, 104], [30, 104]], { head: 10 })
+				P([70, 100], 0, [[137, 102], [84, 107.5]], [[30, 104], [30, 104]], { head: 10 }),
+				P([70, 100], 0, [[137, 102], [84, 84]], [[30, 104], [30, 104]], { head: 10 })
 			]
 		}
 	},
@@ -733,9 +795,9 @@ export const EXERCISES: Exercise[] = [
 		anim: {
 			dur: 2,
 			view: 'front',
-			poles: [[60, 56], [100, 56]],
-			props: [{ kind: 'line', a: [116, 14], b: [116, 110] }],
-			keys: [P([80, 68], 90, [[68, 68], [112, 54]], FRONT_FEET), P([80, 68], 90, [[68, 68], [113, 53]], FRONT_FEET)]
+			pins: [undefined, [92, 54]],
+			props: [{ kind: 'line', a: [110, 14], b: [110, 110] }],
+			keys: [P([80, 68], 90, [[68, 68], [107, 54]], FRONT_FEET), P([80, 68], 90, [[68, 68], [107.5, 53.5]], FRONT_FEET)]
 		}
 	},
 	{
@@ -822,7 +884,7 @@ export const EXERCISES: Exercise[] = [
 			view: 'front',
 			ground: false,
 			props: [MAT],
-			poles: [[50, 52], [110, 52]],
+			bends: [1, -1, -1, 1],
 			keys: [
 				P([80, 72], 90, [[56, 10], [104, 10]], LYING_FEET),
 				P([80, 72], 90, [[37, 42], [123, 42]], LYING_FEET),

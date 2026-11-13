@@ -1,6 +1,6 @@
 // Vérification de la logique d'entraînement : node scripts/check-training.ts (Node 24, types effacés à la volée)
 import assert from 'node:assert/strict';
-import { adaptSession, addDays, isSession, available, DURATIONS, EQUIPMENT, EX, EXERCISES, fatigueFor, planWeek, recommendMinutes, SESSIONS, WARMUP, weekDates, ZONES, type DayLog, type SessionKind, type Zone } from '../src/lib/training.ts';
+import { adaptSession, addDays, isSession, available, DURATIONS, EQUIPMENT, EX, EXERCISES, fatigueFor, planWeek, poseAt, recommendMinutes, SESSIONS, solve, WARMUP, weekDates, ZONES, type DayLog, type SessionKind, type Vec, type Zone } from '../src/lib/training.ts';
 
 const MONDAY = '2026-11-09';
 const week = weekDates('2026-11-12');
@@ -133,5 +133,19 @@ assert.ok(!sorePoignets.includes('pompes') && sorePoignets.includes('rotation-ex
 
 // Type de séance choisi par l'utilisateur : repris par le planning
 assert.equal(planWeek(week, { '2026-11-10': { kind: 'prevention' } }, MONDAY).days[1].kind, 'prevention');
+
+// Animations : coudes et genoux ne sautent jamais d'un côté à l'autre (60 images par transition)
+for (const ex of EXERCISES) {
+	const { anim } = ex;
+	const steps = anim.keys.length * 60;
+	let prev: Vec[] | undefined;
+	for (let s = 0; s <= steps; s++) {
+		const body = solve(anim, poseAt(anim, (s / steps) * anim.keys.length * (anim.dur ?? 1.5)));
+		const joints = [...body.arms, ...body.legs].map((l) => l[1]);
+		const jump = prev ? Math.max(...joints.map((j, i) => Math.hypot(j[0] - prev![i][0], j[1] - prev![i][1]))) : 0;
+		assert.ok(jump < 3, `${ex.id} : coude ou genou retourné (saut de ${jump.toFixed(1)} px)`);
+		prev = joints;
+	}
+}
 
 console.log('check-training : OK');
