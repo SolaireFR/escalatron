@@ -1,0 +1,63 @@
+# APK Android : front embarqué (gosvelte mobile) puis Gradle → artefact « escalatron-apk » (escalatron.apk)
+# Secrets requis : GOSVELTE_TOKEN (fine-grained, SolaireFR/gosvelte, Contents en lecture),
+# GOSVELTE_NPM_TOKEN (classic, read:packages)
+name: APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/SolaireFR/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Accès aux modules Go privés
+        run: git config --global url."https://x-access-token:${{ secrets.GOSVELTE_TOKEN }}@github.com/SolaireFR/".insteadOf "https://github.com/SolaireFR/"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Front embarqué dans android/
+        env:
+          GOSVELTE_NPM_TOKEN: ${{ secrets.GOSVELTE_NPM_TOKEN }}
+        run: |
+          cp .env.example .env
+          # Contournement (README) : Capacitor 8 exige un package.json dans .gosvelte/
+          mkdir -p .gosvelte
+          echo '{ "private": true, "type": "module" }' > .gosvelte/package.json
+          go tool gosvelte mobile
+
+      # ponytail: APK debug (clé de debug, installable tel quel) ; release signé = keystore en secrets + assembleRelease
+      - name: Build APK
+        working-directory: android
+        run: |
+          bash ./gradlew assembleDebug
+          mv app/build/outputs/apk/debug/app-debug.apk ../escalatron.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: escalatron-apk
+          path: escalatron.apk
