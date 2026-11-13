@@ -1,0 +1,6 @@
+/* Surcharges de @solairefr/gosvelte-front/theme.css : orange « corde d'escalade » (contraste 5:1 sur blanc) */
+:root {
+	--primary: #c2410c;
+	--primary-hover: #9a3412;
+	--focus: #c2410c;
+}

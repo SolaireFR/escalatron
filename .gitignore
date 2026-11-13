@@ -1,0 +1,10 @@
+# Généré par la commande gosvelte (configs SvelteKit / Vite, api.ts, env.ts, builds)
+.gosvelte/
+node_modules
+# Données locales (SQLite, fichiers envoyés)
+data/
+# Sauf les dossiers « data » du code (ex : route src/routes/admin/data)
+!/src/**/data/
+.env*
+!.env.example
+*.exe
